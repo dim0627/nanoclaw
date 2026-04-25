@@ -5,7 +5,7 @@
  * Scheduling operations are sent as system actions via messages_out — the host
  * reads them during delivery and applies the changes to inbound.db.
  */
-import { getInboundDb } from '../db/connection.js';
+import { openGroupInboundDbs } from '../db/connection.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { TIMEZONE, parseZonedToUtc } from '../timezone.js';
@@ -111,7 +111,14 @@ export const listTasks: McpToolDefinition = {
   },
   async handler(args) {
     const status = args.status as string | undefined;
-    const db = getInboundDb();
+
+    // Tasks live in messages_in keyed per session — but the user thinks of
+    // them as belonging to "Koko," not "this Slack thread." Read across every
+    // session in the agent group so the list a user sees is the same no
+    // matter which thread they ask from. The host's recurrence machinery
+    // already iterates all sessions, so cross-session reads here just match
+    // the agent's perspective to the host's.
+    //
     // One row per series — the live (pending or paused) occurrence. Recurring
     // tasks accumulate one completed row per firing plus one live follow-up;
     // exposing the whole pile to the agent is noisy and confuses task identity
@@ -120,34 +127,76 @@ export const listTasks: McpToolDefinition = {
     // SQLite quirk: when MAX(seq) appears in the SELECT list of a GROUP BY
     // query, the bare columns take values from the row that contains that max
     // — that's how we pick "the latest live row per series" in one pass.
-    let rows;
-    if (status) {
-      rows = db
-        .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-             FROM messages_in
-            WHERE kind = 'task' AND status = ?
-            GROUP BY series_id
-            ORDER BY process_after ASC`,
-        )
-        .all(status);
-    } else {
-      rows = db
-        .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-             FROM messages_in
-            WHERE kind = 'task' AND status IN ('pending', 'paused')
-            GROUP BY series_id
-            ORDER BY process_after ASC`,
-        )
-        .all();
+    type Row = {
+      id: string;
+      status: string;
+      process_after: string | null;
+      recurrence: string | null;
+      content: string;
+      _seq: number;
+    };
+
+    const dbs = openGroupInboundDbs();
+    const collected = new Map<string, Row>();
+    try {
+      for (const { db } of dbs) {
+        const rows = (
+          status
+            ? db
+                .prepare(
+                  `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
+                     FROM messages_in
+                    WHERE kind = 'task' AND status = ?
+                    GROUP BY series_id
+                    ORDER BY process_after ASC`,
+                )
+                .all(status)
+            : db
+                .prepare(
+                  `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
+                     FROM messages_in
+                    WHERE kind = 'task' AND status IN ('pending', 'paused')
+                    GROUP BY series_id
+                    ORDER BY process_after ASC`,
+                )
+                .all()
+        ) as Row[];
+        // De-dupe across sessions: a task series should only exist in one
+        // session, but if anything leaks (mid-migration, etc) keep the row
+        // with the highest seq — that's the latest state for the series.
+        for (const row of rows) {
+          const existing = collected.get(row.id);
+          if (!existing || row._seq > existing._seq) {
+            collected.set(row.id, row);
+          }
+        }
+      }
+    } finally {
+      // Close everything except the cached current-session DB returned by
+      // getInboundDb(). openGroupInboundDbs returns fresh handles for the
+      // sibling-mount path; close those to free fds.
+      for (const { sessionId, db } of dbs) {
+        if (sessionId !== 'current') {
+          try {
+            db.close();
+          } catch {
+            // ignore
+          }
+        }
+      }
     }
 
-    if ((rows as unknown[]).length === 0) return ok('No tasks found.');
+    if (collected.size === 0) return ok('No tasks found.');
 
-    const lines = (rows as Array<{ id: string; status: string; process_after: string | null; recurrence: string | null; content: string }>).map((r) => {
+    const sorted = [...collected.values()].sort((a, b) => {
+      const ap = a.process_after ?? '';
+      const bp = b.process_after ?? '';
+      return ap.localeCompare(bp);
+    });
+
+    const lines = sorted.map((r) => {
       const content = JSON.parse(r.content);
-      const prompt = (content.prompt as string || '').slice(0, 80);
+      const prompt = ((content.prompt as string) || '').slice(0, 80);
       return `- ${r.id} [${r.status}] at=${r.process_after || 'now'} ${r.recurrence ? `recur=${r.recurrence} ` : ''}→ ${prompt}`;
     });
 

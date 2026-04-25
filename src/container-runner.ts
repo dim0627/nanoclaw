@@ -236,6 +236,17 @@ function buildMounts(
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
+  // All sibling sessions of this agent group, read-only. Lets the agent see
+  // tasks/state created in *other* threads (e.g. list_tasks across sessions).
+  // The current session is reachable via /workspace, but it also appears here
+  // — readers should treat both views as the same data.
+  const groupSessionsDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id);
+  mounts.push({
+    hostPath: groupSessionsDir,
+    containerPath: '/agent-group-sessions',
+    readonly: true,
+  });
+
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 

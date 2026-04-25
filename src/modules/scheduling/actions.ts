@@ -7,14 +7,57 @@
  * reaches into this module via the delivery-action registry and we apply the
  * change to inbound.db here.
  */
+import fs from 'fs';
 import type Database from 'better-sqlite3';
 
 import { wakeContainer } from '../../container-runner.js';
-import { getSession } from '../../db/sessions.js';
+import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { writeSessionMessage } from '../../session-manager.js';
+import { inboundDbPath, openInboundDb, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpdate } from './db.js';
+
+/**
+ * Apply a task mutation across every session in the agent group.
+ *
+ * Tasks are stored per-session in messages_in but users think of them as
+ * belonging to the agent ("Koko's reminders"), not the thread that created
+ * them. When a cancel/pause/resume/update arrives it should match the task
+ * wherever it lives — usually a sibling session.
+ *
+ * Skips the current session's DB if the caller has already operated on it
+ * (passed via `currentInDb`) so we don't double-count rows.
+ */
+function applyAcrossGroup(
+  agentGroupId: string,
+  currentSessionId: string,
+  currentInDb: Database.Database,
+  fn: (db: Database.Database) => number,
+): number {
+  let total = fn(currentInDb);
+  for (const sibling of getSessionsByAgentGroup(agentGroupId)) {
+    if (sibling.id === currentSessionId) continue;
+    const dbPath = inboundDbPath(agentGroupId, sibling.id);
+    if (!fs.existsSync(dbPath)) continue;
+    let db: Database.Database;
+    try {
+      db = openInboundDb(agentGroupId, sibling.id);
+    } catch (err) {
+      log.warn('applyAcrossGroup: failed to open sibling inbound DB', {
+        agentGroupId,
+        siblingSessionId: sibling.id,
+        err,
+      });
+      continue;
+    }
+    try {
+      total += fn(db);
+    } finally {
+      db.close();
+    }
+  }
+  return total;
+}
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
@@ -41,32 +84,38 @@ export async function handleScheduleTask(
 
 export async function handleCancelTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  cancelTask(inDb, taskId);
-  log.info('Task cancelled', { taskId });
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
+    cancelTask(db, taskId),
+  );
+  log.info('Task cancelled', { taskId, touched });
 }
 
 export async function handlePauseTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  pauseTask(inDb, taskId);
-  log.info('Task paused', { taskId });
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
+    pauseTask(db, taskId),
+  );
+  log.info('Task paused', { taskId, touched });
 }
 
 export async function handleResumeTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  resumeTask(inDb, taskId);
-  log.info('Task resumed', { taskId });
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
+    resumeTask(db, taskId),
+  );
+  log.info('Task resumed', { taskId, touched });
 }
 
 export async function handleUpdateTask(
@@ -84,7 +133,9 @@ export async function handleUpdateTask(
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
   }
-  const touched = updateTask(inDb, taskId, update);
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
+    updateTask(db, taskId, update),
+  );
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
   if (touched === 0) {
     // Notify the agent that update_task matched nothing. Replicates the

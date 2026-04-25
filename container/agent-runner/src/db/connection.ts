@@ -19,10 +19,15 @@
  */
 import { Database } from 'bun:sqlite';
 import fs from 'fs';
+import path from 'path';
 
 const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
 const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
+// Read-only mount of `data/v2-sessions/<agent_group_id>/`. Lets MCP tools see
+// state created in sibling sessions (other Slack threads, other channels).
+// Set up by src/container-runner.ts in buildMounts.
+const GROUP_SESSIONS_PATH = '/agent-group-sessions';
 
 let _inbound: Database | null = null;
 let _outbound: Database | null = null;
@@ -35,6 +40,37 @@ export function getInboundDb(): Database {
     _inbound.exec('PRAGMA busy_timeout = 5000');
   }
   return _inbound;
+}
+
+/**
+ * Open every sibling session's inbound.db (this agent group, this and other
+ * threads) read-only. Caller is responsible for closing each. Returns just
+ * the current session's DB if the group-sessions mount isn't present (older
+ * spawn path or unit tests).
+ *
+ * The current session's DB is included via its sibling path under
+ * GROUP_SESSIONS_PATH, NOT via the cached singleton — keeping these as fresh
+ * handles avoids any cache-aliasing surprises across mount points.
+ */
+export function openGroupInboundDbs(): Array<{ sessionId: string; db: Database }> {
+  if (!fs.existsSync(GROUP_SESSIONS_PATH)) {
+    return [{ sessionId: 'current', db: getInboundDb() }];
+  }
+  const out: Array<{ sessionId: string; db: Database }> = [];
+  for (const entry of fs.readdirSync(GROUP_SESSIONS_PATH)) {
+    if (!entry.startsWith('sess-')) continue;
+    const dbPath = path.join(GROUP_SESSIONS_PATH, entry, 'inbound.db');
+    if (!fs.existsSync(dbPath)) continue;
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 5000');
+      out.push({ sessionId: entry, db });
+    } catch {
+      // Skip sessions whose DB is mid-rotation or otherwise unopenable. The
+      // common case is the host removing a stale session right as we read.
+    }
+  }
+  return out;
 }
 
 /** Outbound DB — container owns this file (sole writer). */
