@@ -88,9 +88,7 @@ export async function handleCancelTask(
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
-    cancelTask(db, taskId),
-  );
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) => cancelTask(db, taskId));
   log.info('Task cancelled', { taskId, touched });
 }
 
@@ -100,9 +98,7 @@ export async function handlePauseTask(
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
-    pauseTask(db, taskId),
-  );
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) => pauseTask(db, taskId));
   log.info('Task paused', { taskId, touched });
 }
 
@@ -112,9 +108,7 @@ export async function handleResumeTask(
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
-    resumeTask(db, taskId),
-  );
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) => resumeTask(db, taskId));
   log.info('Task resumed', { taskId, touched });
 }
 
@@ -133,9 +127,7 @@ export async function handleUpdateTask(
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
   }
-  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) =>
-    updateTask(db, taskId, update),
-  );
+  const touched = applyAcrossGroup(session.agent_group_id, session.id, inDb, (db) => updateTask(db, taskId, update));
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
   if (touched === 0) {
     // Notify the agent that update_task matched nothing. Replicates the

@@ -182,15 +182,11 @@ describe('parseSqliteDatetime', () => {
   });
 
   it('respects an explicit Z marker', () => {
-    expect(parseSqliteDatetime('2026-04-25T01:33:04.000Z')).toBe(
-      Date.parse('2026-04-25T01:33:04.000Z'),
-    );
+    expect(parseSqliteDatetime('2026-04-25T01:33:04.000Z')).toBe(Date.parse('2026-04-25T01:33:04.000Z'));
   });
 
   it('respects an explicit offset', () => {
-    expect(parseSqliteDatetime('2026-04-25T10:33:04+09:00')).toBe(
-      Date.parse('2026-04-25T01:33:04.000Z'),
-    );
+    expect(parseSqliteDatetime('2026-04-25T10:33:04+09:00')).toBe(Date.parse('2026-04-25T01:33:04.000Z'));
   });
 });
 
